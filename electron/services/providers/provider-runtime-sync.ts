@@ -15,6 +15,10 @@ import {
   updateAgentModelProvider,
   updateSingleAgentModelProvider,
 } from '../../utils/openclaw-auth';
+import {
+  piAiModelsJsonModelEntry,
+  type PiAiModelCostRates,
+} from '../../shared/pi-ai-model-cost';
 import { logger } from '../../utils/logger';
 import { listAgentsSnapshot } from '../../utils/agent-config';
 
@@ -342,7 +346,7 @@ async function syncCustomProviderAgentModel(
   await updateAgentModelProvider(runtimeProviderKey, {
     baseUrl: normalizeProviderBaseUrl(config, config.baseUrl, config.apiProtocol || 'openai-completions'),
     api: config.apiProtocol || 'openai-completions',
-    models: modelId ? [{ id: modelId, name: modelId }] : [],
+    models: modelId ? [piAiModelsJsonModelEntry(modelId)] : [],
     apiKey: resolvedKey,
   });
 }
@@ -411,7 +415,7 @@ async function buildAgentModelProviderEntry(
 ): Promise<{
   baseUrl?: string;
   api?: string;
-  models?: Array<{ id: string; name: string }>;
+  models?: Array<{ id: string; name: string; cost: PiAiModelCostRates }>;
   apiKey?: string;
   authHeader?: boolean;
 } | null> {
@@ -440,7 +444,7 @@ async function buildAgentModelProviderEntry(
   return {
     baseUrl,
     api,
-    models: [{ id: modelId, name: modelId }],
+    models: [piAiModelsJsonModelEntry(modelId)],
     apiKey,
     authHeader,
   };
@@ -695,7 +699,7 @@ export async function syncDefaultProviderToRuntime(
         api,
         authHeader: targetProviderKey === 'minimax-portal' ? true : undefined,
         apiKey: targetProviderKey === 'minimax-portal' ? 'minimax-oauth' : 'qwen-oauth',
-        models: defaultModelId ? [{ id: defaultModelId, name: defaultModelId }] : [],
+        models: defaultModelId ? [piAiModelsJsonModelEntry(defaultModelId)] : [],
       });
     } catch (err) {
       logger.warn(`Failed to update models.json for OAuth provider "${targetProviderKey}":`, err);
@@ -711,7 +715,7 @@ export async function syncDefaultProviderToRuntime(
     await updateAgentModelProvider(ock, {
       baseUrl: normalizeProviderBaseUrl(provider, provider.baseUrl, provider.apiProtocol || 'openai-completions'),
       api: provider.apiProtocol || 'openai-completions',
-      models: modelId ? [{ id: modelId, name: modelId }] : [],
+      models: modelId ? [piAiModelsJsonModelEntry(modelId)] : [],
       apiKey: providerKey,
     });
   }

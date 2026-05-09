@@ -26,6 +26,7 @@ import {
   isOAuthProviderType,
   isOpenClawOAuthPluginProviderKey,
 } from './provider-keys';
+import { normalizePiAiModelCost, type PiAiModelCostRates } from '@electron/shared/pi-ai-model-cost';
 import { withConfigLock } from './config-mutex';
 
 const AUTH_STORE_VERSION = 1;
@@ -1753,7 +1754,7 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
 type AgentModelProviderEntry = {
   baseUrl?: string;
   api?: string;
-  models?: Array<{ id: string; name: string }>;
+  models?: Array<{ id: string; name: string; cost?: PiAiModelCostRates }>;
   apiKey?: string;
   /** When true, pi-ai sends Authorization: Bearer instead of x-api-key */
   authHeader?: boolean;
@@ -1788,7 +1789,11 @@ async function updateModelsJsonProviderEntriesForAgents(
 
     const mergedModels = (entry.models ?? []).map((m) => {
       const prev = existingModels.find((e) => e.id === m.id);
-      return prev ? { ...prev, id: m.id, name: m.name } : { ...m };
+      const base = prev ? { ...prev, id: m.id, name: m.name } : { ...m };
+      return {
+        ...base,
+        cost: normalizePiAiModelCost((base as { cost?: unknown }).cost),
+      };
     });
 
     if (entry.baseUrl !== undefined) existing.baseUrl = entry.baseUrl;

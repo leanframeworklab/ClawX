@@ -253,7 +253,7 @@ describe('provider-runtime-sync refresh strategy', () => {
       expect.objectContaining({
         baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
         api: 'openai-completions',
-        models: [{ id: 'ark-code-latest', name: 'ark-code-latest' }],
+        models: [{ id: 'ark-code-latest', name: 'ark-code-latest', cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
       }),
     );
   });
