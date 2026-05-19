@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { matchesOptimisticUserMessage } from '@/stores/chat/helpers';
+import { matchesOptimisticUserMessage, mergeOptimisticUserIntoLoadedHistory } from '@/stores/chat/helpers';
 
 describe('matchesOptimisticUserMessage', () => {
   it('matches when text is identical', () => {
@@ -113,5 +113,190 @@ describe('matchesOptimisticUserMessage', () => {
     } as const;
 
     expect(matchesOptimisticUserMessage(candidate, optimistic, 1_700_000_000_000)).toBe(true);
+  });
+});
+
+describe('mergeOptimisticUserIntoLoadedHistory', () => {
+  const userTimestampMs = 1_700_000_000_000;
+  const optimistic = {
+    role: 'user',
+    content: 'Analyze the repository',
+    timestamp: userTimestampMs / 1000,
+  } as const;
+
+  it('keeps older repeated prompts and coalesces only duplicate echoes near the active send', () => {
+    const currentEchoTimestamp = userTimestampMs / 1000;
+    const messages = mergeOptimisticUserIntoLoadedHistory(
+      [
+        { role: 'user', content: 'Analyze the repository', timestamp: 1 },
+        { role: 'assistant', content: 'Older answer', timestamp: 2 },
+        { role: 'user', content: 'Analyze the repository', timestamp: currentEchoTimestamp - 1 },
+        { role: 'user', content: 'Analyze the repository', timestamp: currentEchoTimestamp },
+        { role: 'assistant', content: 'Working', timestamp: currentEchoTimestamp + 1 },
+      ],
+      [
+        { role: 'user', content: 'Analyze the repository', timestamp: 1 },
+        { role: 'assistant', content: 'Older answer', timestamp: 2 },
+        { role: 'user', content: 'Analyze the repository', timestamp: currentEchoTimestamp - 1 },
+        { role: 'user', content: 'Analyze the repository', timestamp: currentEchoTimestamp },
+        { role: 'assistant', content: 'Working', timestamp: currentEchoTimestamp + 1 },
+      ],
+      [optimistic],
+      true,
+      userTimestampMs,
+    );
+
+    expect(messages.map((message) => message.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
+    expect(messages.map((message) => message.content)).toEqual([
+      'Analyze the repository',
+      'Older answer',
+      'Analyze the repository',
+      'Working',
+    ]);
+    expect(messages[2]?.timestamp).toBe(currentEchoTimestamp);
+  });
+
+  it('preserves optimistic user at the tail when history only contains pre-send assistant activity', () => {
+    const messages = mergeOptimisticUserIntoLoadedHistory(
+      [
+        { role: 'user', content: 'Previous prompt', timestamp: 1 },
+        { role: 'assistant', content: 'Previous answer', timestamp: 2 },
+      ],
+      [
+        { role: 'user', content: 'Previous prompt', timestamp: 1 },
+        { role: 'assistant', content: 'Previous answer', timestamp: 2 },
+      ],
+      [optimistic],
+      true,
+      userTimestampMs,
+    );
+
+    expect(messages.map((message) => message.content)).toEqual([
+      'Previous prompt',
+      'Previous answer',
+      'Analyze the repository',
+    ]);
+  });
+
+  it('keeps near duplicate prompts when attachment signatures are explicitly different', () => {
+    const currentEchoTimestamp = userTimestampMs / 1000;
+    const messages = mergeOptimisticUserIntoLoadedHistory(
+      [
+        {
+          role: 'user',
+          content: 'Analyze the repository',
+          timestamp: currentEchoTimestamp - 1,
+          _attachedFiles: [{ fileName: 'a.txt', mimeType: 'text/plain', fileSize: 1, preview: null, filePath: '/tmp/a.txt' }],
+        },
+        {
+          role: 'user',
+          content: 'Analyze the repository',
+          timestamp: currentEchoTimestamp,
+          _attachedFiles: [{ fileName: 'b.txt', mimeType: 'text/plain', fileSize: 1, preview: null, filePath: '/tmp/b.txt' }],
+        },
+      ],
+      [],
+      [{
+        ...optimistic,
+        _attachedFiles: [{ fileName: 'b.txt', mimeType: 'text/plain', fileSize: 1, preview: null, filePath: '/tmp/b.txt' }],
+      }],
+      true,
+      userTimestampMs,
+    );
+
+    expect(messages).toHaveLength(2);
+  });
+
+  it('inserts optimistic user before timestamp-less partial assistant activity instead of appending at tail', () => {
+    const messages = mergeOptimisticUserIntoLoadedHistory(
+      [
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'tool-1', name: 'Read', input: {} }] },
+      ],
+      [
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'tool-1', name: 'Read', input: {} }] },
+      ],
+      [optimistic],
+      true,
+      userTimestampMs,
+    );
+
+    expect(messages.map((message) => message.role)).toEqual(['user', 'assistant']);
+  });
+
+  it('preserves optimistic user at tail when old visible history exists and only post-send tool_result is filtered out', () => {
+    const messages = mergeOptimisticUserIntoLoadedHistory(
+      [
+        { role: 'user', content: 'Previous prompt', timestamp: 1 },
+        { role: 'assistant', content: 'Previous answer', timestamp: 2 },
+      ],
+      [
+        { role: 'user', content: 'Previous prompt', timestamp: 1 },
+        { role: 'assistant', content: 'Previous answer', timestamp: 2 },
+        { role: 'toolresult', content: 'tool finished', timestamp: userTimestampMs / 1000 + 1 },
+      ],
+      [optimistic],
+      true,
+      userTimestampMs,
+    );
+
+    expect(messages.map((message) => message.content)).toEqual([
+      'Previous prompt',
+      'Previous answer',
+      'Analyze the repository',
+    ]);
+  });
+
+  it('preserves optimistic user when old same-text user has no timestamp', () => {
+    const messages = mergeOptimisticUserIntoLoadedHistory(
+      [
+        { role: 'user', content: 'Analyze the repository' },
+        { role: 'assistant', content: 'Previous answer without timestamp' },
+      ],
+      [
+        { role: 'user', content: 'Analyze the repository' },
+        { role: 'assistant', content: 'Previous answer without timestamp' },
+      ],
+      [optimistic],
+      true,
+      userTimestampMs,
+    );
+
+    expect(messages.map((message) => message.content)).toEqual([
+      'Analyze the repository',
+      'Previous answer without timestamp',
+      'Analyze the repository',
+    ]);
+  });
+
+  it('preserves optimistic user after old timestamp-less history when no current activity is visible', () => {
+    const messages = mergeOptimisticUserIntoLoadedHistory(
+      [
+        { role: 'user', content: 'Previous prompt' },
+        { role: 'assistant', content: 'Previous answer without timestamp' },
+      ],
+      [
+        { role: 'user', content: 'Previous prompt' },
+        { role: 'assistant', content: 'Previous answer without timestamp' },
+      ],
+      [optimistic],
+      true,
+      userTimestampMs,
+    );
+
+    expect(messages.map((message) => message.content)).toEqual([
+      'Previous prompt',
+      'Previous answer without timestamp',
+      'Analyze the repository',
+    ]);
+  });
+
+  it('matches optimistic user when Gateway prefixes Sender metadata', () => {
+    const candidate = {
+      role: 'user',
+      content: 'Sender (untrusted metadata): {"channel":"test"}\nAnalyze the repository',
+      timestamp: userTimestampMs / 1000,
+    } as const;
+
+    expect(matchesOptimisticUserMessage(candidate, optimistic, userTimestampMs)).toBe(true);
   });
 });

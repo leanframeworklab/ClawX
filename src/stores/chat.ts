@@ -10,6 +10,10 @@ import { useAgentsStore } from './agents';
 import { buildBaselineRunKey, captureBaseline, clearBaselines } from './baseline-cache';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
 import {
+  mergeOptimisticUserIntoLoadedHistory,
+  mergePendingOptimisticUserMessages,
+} from './chat/helpers';
+import {
   CHAT_HISTORY_DISK_FALLBACK_TIMEOUT_MS,
   CHAT_HISTORY_STARTUP_RETRY_DELAYS_MS,
   classifyHistoryStartupRetryError,
@@ -467,140 +471,6 @@ function normalizeStreamingMessage(message: unknown): unknown {
     : rawMessage;
 }
 
-/**
- * Strip Gateway-injected metadata that does NOT exist on the renderer's
- * optimistic user message but is echoed back when the Gateway persists it:
- *   - leading sender metadata `Sender (untrusted metadata): ...`
- *   - leading timestamp `[Wed 2026-04-22 10:30 GMT+8] `
- *   - `[message_id: uuid]` tags sprinkled throughout the text
- *   - `[media attached: path (mime) | path]` references appended when the
- *     renderer sends attachments via `chat:sendWithMedia`
- *   - Gateway-injected "Conversation info (untrusted metadata): ..." blocks
- *
- * Keeping this aligned with `cleanUserText` in `pages/Chat/message-utils.ts`
- * is important: the user bubble renders the cleaned text, so the comparison
- * used to dedupe optimistic vs server echoes must operate on the same
- * cleaned form — otherwise the same visible message renders twice.
- *
- * Order matters: the `[media attached: ...]` lines are commonly emitted
- * BETWEEN the Sender block and the `[Mon ... GMT+8]` timestamp prefix.
- * If we strip the timestamp before the media-attached lines, the timestamp
- * regex (`^\s*\[(?:Mon|...)]`) can never match because the leading `[` is
- * `[media attached:` instead — leaving the timestamp in the normalized
- * comparison text and breaking optimistic-vs-echo dedupe.
- */
-function stripGatewayUserMetadata(text: string): string {
-  return text
-    .replace(/\s*\[media attached:[^\]]*\]/g, '')
-    .replace(/\s*\[message_id:\s*[^\]]+\]/g, '')
-    .replace(/^Sender\s*\([^)]*\)\s*:\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
-    .replace(/^Sender\s*\([^)]*\)\s*:\s*\{[\s\S]*?\}\s*/i, '')
-    .replace(/^Sender\s*\([^)]*\)\s*:\s*[^\n]*(?:\n\s*)*/i, '')
-    .replace(/^Sender\s*:\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
-    .replace(/^Sender\s*:\s*\{[\s\S]*?\}\s*/i, '')
-    .replace(/^Sender\s*:\s*[^\n]*(?:\n\s*)*/i, '')
-    .replace(/^Conversation info\s*\([^)]*\):\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
-    .replace(/^Conversation info\s*\([^)]*\):\s*\{[\s\S]*?\}\s*/i, '')
-    .replace(/^\s*\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+[^\]]+\]\s*/i, '');
-}
-
-function normalizeComparableUserText(content: unknown): string {
-  return stripGatewayUserMetadata(getMessageText(content))
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function getComparableAttachmentSignature(message: Pick<RawMessage, '_attachedFiles'>): string {
-  const files = (message._attachedFiles || [])
-    .map((file) => file.filePath || `${file.fileName}|${file.mimeType}|${file.fileSize}`)
-    .filter(Boolean)
-    .sort();
-  return files.join('::');
-}
-
-function matchesOptimisticUserMessage(
-  candidate: RawMessage,
-  optimistic: RawMessage,
-  optimisticTimestampMs: number,
-): boolean {
-  if (candidate.role !== 'user') return false;
-
-  const optimisticText = normalizeComparableUserText(optimistic.content);
-  const candidateText = normalizeComparableUserText(candidate.content);
-  const sameText = optimisticText.length > 0 && optimisticText === candidateText;
-
-  const optimisticAttachments = getComparableAttachmentSignature(optimistic);
-  const candidateAttachments = getComparableAttachmentSignature(candidate);
-  const sameAttachments = optimisticAttachments.length > 0 && optimisticAttachments === candidateAttachments;
-
-  const hasOptimisticTimestamp = Number.isFinite(optimisticTimestampMs) && optimisticTimestampMs > 0;
-  const hasCandidateTimestamp = candidate.timestamp != null;
-  const timestampMatches = hasOptimisticTimestamp && hasCandidateTimestamp
-    ? Math.abs(toMs(candidate.timestamp as number) - optimisticTimestampMs) < 5000
-    : false;
-
-  if (sameText && sameAttachments) return true;
-  if (sameText && (!optimisticAttachments || !candidateAttachments) && (timestampMatches || !hasCandidateTimestamp)) return true;
-  if (sameAttachments && (!optimisticText || !candidateText) && (timestampMatches || !hasCandidateTimestamp)) return true;
-  return false;
-}
-
-function rememberPendingOptimisticUserMessage(sessionKey: string, message: RawMessage, timestampMs: number): void {
-  const now = Date.now();
-  const existing = (_pendingOptimisticUserMessages.get(sessionKey) || [])
-    .filter((entry) => now - entry.createdAtMs <= OPTIMISTIC_USER_MESSAGE_TTL_MS);
-  existing.push({ message, timestampMs, createdAtMs: now });
-  _pendingOptimisticUserMessages.set(sessionKey, existing);
-}
-
-function clearPendingOptimisticUserMessages(sessionKey: string): void {
-  _pendingOptimisticUserMessages.delete(sessionKey);
-}
-
-function mergePendingOptimisticUserMessages(sessionKey: string, loadedMessages: RawMessage[]): RawMessage[] {
-  const pending = _pendingOptimisticUserMessages.get(sessionKey);
-  if (!pending || pending.length === 0) return loadedMessages;
-
-  const now = Date.now();
-  let merged = loadedMessages;
-  const stillPending: PendingOptimisticUserMessage[] = [];
-
-  for (const entry of pending) {
-    if (now - entry.createdAtMs > OPTIMISTIC_USER_MESSAGE_TTL_MS) {
-      continue;
-    }
-
-    const hasServerEcho = loadedMessages.some((message) =>
-      matchesOptimisticUserMessage(message, entry.message, entry.timestampMs),
-    );
-    if (hasServerEcho) {
-      continue;
-    }
-
-    const alreadyRendered = merged.some((message) =>
-      message.id === entry.message.id || matchesOptimisticUserMessage(message, entry.message, entry.timestampMs),
-    );
-    if (!alreadyRendered) {
-      const insertAt = merged.findIndex((message) =>
-        typeof message.timestamp === 'number' && toMs(message.timestamp) > entry.timestampMs,
-      );
-      merged = insertAt === -1
-        ? [...merged, entry.message]
-        : [...merged.slice(0, insertAt), entry.message, ...merged.slice(insertAt)];
-    }
-
-    stillPending.push(entry);
-  }
-
-  if (stillPending.length > 0) {
-    _pendingOptimisticUserMessages.set(sessionKey, stillPending);
-  } else {
-    _pendingOptimisticUserMessages.delete(sessionKey);
-  }
-
-  return merged;
-}
-
 function snapshotStreamingAssistantMessage(
   currentStream: RawMessage | null,
   existingMessages: RawMessage[],
@@ -620,12 +490,6 @@ function snapshotStreamingAssistantMessage(
     role: 'assistant',
     id: snapId,
   }];
-}
-
-function getLatestOptimisticUserMessage(messages: RawMessage[], userTimestampMs: number): RawMessage | undefined {
-  return [...messages].reverse().find(
-    (message) => message.role === 'user' && (!message.timestamp || Math.abs(toMs(message.timestamp) - userTimestampMs) < 5000),
-  );
 }
 
 /** Extract plain text from message content (string or content blocks) */
@@ -2252,21 +2116,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Restore file attachments for user/assistant messages (from cache + text patterns)
       const enrichedMessages = enrichWithCachedImages(filteredMessages);
 
-      // Preserve optimistic user messages independently from sending state.
-      // Gateway phase=end can clear sending before chat.history has persisted
-      // the user turn; without this, an early quiet reload briefly removes it.
-      let finalMessages = mergePendingOptimisticUserMessages(currentSessionKey, enrichedMessages);
-      const userMsgAt = get().lastUserMessageAt;
-      if (get().sending && userMsgAt) {
-        const userMsMs = toMs(userMsgAt);
-        const optimistic = getLatestOptimisticUserMessage(get().messages, userMsMs);
-        const hasMatchingUser = optimistic
-          ? finalMessages.some((message) => matchesOptimisticUserMessage(message, optimistic, userMsMs))
-          : false;
-        if (optimistic && !hasMatchingUser) {
-          finalMessages = [...finalMessages, optimistic];
-        }
-      }
+      // Preserve pending optimistic users even after sending is cleared, then
+      // merge the active optimistic user through the shared helper used by the
+      // split-store tests to keep duplicate-prompt behavior in one place.
+      const pendingMergedMessages = mergePendingOptimisticUserMessages(currentSessionKey, enrichedMessages);
+      const finalMessages = mergeOptimisticUserIntoLoadedHistory(
+        pendingMergedMessages,
+        messagesWithToolImages,
+        get().messages,
+        get().sending,
+        get().lastUserMessageAt,
+      );
 
       const { pendingFinal, lastUserMessageAt, sending: isSendingNow } = get();
       const userMsTs = lastUserMessageAt ? toMs(lastUserMessageAt) : 0;

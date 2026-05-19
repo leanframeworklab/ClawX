@@ -45,49 +45,23 @@ vi.mock('@/stores/gateway', () => ({
   },
 }));
 
-vi.mock('@/stores/chat/helpers', () => ({
-  clearHistoryPoll: (...args: unknown[]) => clearHistoryPoll(...args),
-  enrichWithCachedImages: (...args: unknown[]) => enrichWithCachedImages(...args),
-  enrichWithToolResultFiles: (...args: unknown[]) => enrichWithToolResultFiles(...args),
-  getLatestOptimisticUserMessage: (messages: Array<{ role: string; timestamp?: number }>, userTimestampMs: number) =>
-    [...messages].reverse().find(
-      (message) => message.role === 'user'
-        && (!message.timestamp || Math.abs(toMs(message.timestamp) - userTimestampMs) < 5000),
-    ),
-  getMessageText: (...args: unknown[]) => getMessageText(...args),
-  hasNonToolAssistantContent: (...args: unknown[]) => hasNonToolAssistantContent(...args),
-  isInternalMessage: (...args: unknown[]) => isInternalMessage(...args),
-  isToolResultRole: (...args: unknown[]) => isToolResultRole(...args),
-  loadMissingPreviews: (...args: unknown[]) => loadMissingPreviews(...args),
-  mergePendingOptimisticUserMessages: (_sessionKey: string, messages: unknown[]) => messages,
-  matchesOptimisticUserMessage: (
-    candidate: { role: string; timestamp?: number; content?: unknown; _attachedFiles?: Array<{ filePath?: string; fileName?: string; mimeType?: string; fileSize?: number }> },
-    optimistic: { role: string; timestamp?: number; content?: unknown; _attachedFiles?: Array<{ filePath?: string; fileName?: string; mimeType?: string; fileSize?: number }> },
-    optimisticTimestampMs: number,
-  ) => {
-    if (candidate.role !== 'user') return false;
-    const normalizeText = (content: unknown) => (typeof content === 'string' ? content : '')
-      .replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+[^\]]+\]\s*/i, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-    const candidateText = normalizeText(candidate.content);
-    const optimisticText = normalizeText(optimistic.content);
-    const candidateAttachments = (candidate._attachedFiles || []).map((file) => file.filePath || `${file.fileName}|${file.mimeType}|${file.fileSize}`).sort().join('::');
-    const optimisticAttachments = (optimistic._attachedFiles || []).map((file) => file.filePath || `${file.fileName}|${file.mimeType}|${file.fileSize}`).sort().join('::');
-    const hasCandidateTimestamp = candidate.timestamp != null;
-    const timestampMatches = hasCandidateTimestamp
-      ? Math.abs(toMs(candidate.timestamp as number) - optimisticTimestampMs) < 5000
-      : false;
-
-    if (candidateText && optimisticText && candidateText === optimisticText && candidateAttachments === optimisticAttachments) return true;
-    if (candidateText && optimisticText && candidateText === optimisticText && (!hasCandidateTimestamp || timestampMatches)) return true;
-    if (candidateAttachments && optimisticAttachments && candidateAttachments === optimisticAttachments && (!hasCandidateTimestamp || timestampMatches)) return true;
-    return false;
-  },
-  getMessageErrorMessage: (...args: unknown[]) => getMessageErrorMessage(...args),
-  getMessageStopReason: (...args: unknown[]) => getMessageStopReason(...args),
-  toMs: (...args: unknown[]) => toMs(...args as Parameters<typeof toMs>),
-}));
+vi.mock('@/stores/chat/helpers', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/chat/helpers')>();
+  return {
+    ...actual,
+    clearHistoryPoll: (...args: unknown[]) => clearHistoryPoll(...args),
+    enrichWithCachedImages: (...args: unknown[]) => enrichWithCachedImages(...args),
+    enrichWithToolResultFiles: (...args: unknown[]) => enrichWithToolResultFiles(...args),
+    getMessageText: (...args: unknown[]) => getMessageText(...args),
+    hasNonToolAssistantContent: (...args: unknown[]) => hasNonToolAssistantContent(...args),
+    isInternalMessage: (...args: unknown[]) => isInternalMessage(...args),
+    isToolResultRole: (...args: unknown[]) => isToolResultRole(...args),
+    loadMissingPreviews: (...args: unknown[]) => loadMissingPreviews(...args),
+    getMessageErrorMessage: (...args: unknown[]) => getMessageErrorMessage(...args),
+    getMessageStopReason: (...args: unknown[]) => getMessageStopReason(...args),
+    toMs: (...args: unknown[]) => toMs(...args as Parameters<typeof toMs>),
+  };
+});
 
 type ChatLikeState = {
   currentSessionKey: string;
@@ -734,6 +708,85 @@ describe('chat history actions', () => {
     expect(h.read().messages.map((message) => message.content)).toEqual([
       'Open browser, search for tech news, and take a screenshot',
       'Processing',
+    ]);
+  });
+
+  it('does not append optimistic user at the tail when active partial history already has assistant activity', async () => {
+    const { createHistoryActions } = await import('@/stores/chat/history-actions');
+    const h = makeHarness({
+      currentSessionKey: 'agent:main:main',
+      sending: true,
+      pendingFinal: false,
+      lastUserMessageAt: 1_773_281_732_000,
+      messages: [
+        {
+          role: 'user',
+          content: 'Analyze a large repository',
+          timestamp: 1_773_281_732,
+        },
+      ],
+    });
+    const actions = createHistoryActions(h.set as never, h.get as never);
+
+    invokeIpcMock.mockResolvedValueOnce({
+      success: true,
+      result: {
+        messages: [
+          {
+            role: 'assistant',
+            content: [{ type: 'tool_use', id: 'tool-1', name: 'read', input: { path: 'README.md' } }],
+            timestamp: 1_773_281_733,
+          },
+        ],
+      },
+    });
+
+    await actions.loadHistory(true);
+
+    expect(h.read().messages.map((message) => message.role)).toEqual(['user', 'assistant']);
+    expect(h.read().messages.map((message) => message.content)).toEqual([
+      'Analyze a large repository',
+      [{ type: 'tool_use', id: 'tool-1', name: 'read', input: { path: 'README.md' } }],
+    ]);
+    expect(h.read().pendingFinal).toBe(true);
+  });
+
+  it('does not append optimistic user at the tail when active partial history only has tool results', async () => {
+    const { createHistoryActions } = await import('@/stores/chat/history-actions');
+    const h = makeHarness({
+      currentSessionKey: 'agent:main:main',
+      sending: true,
+      lastUserMessageAt: 1_773_281_732_000,
+      messages: [
+        {
+          role: 'user',
+          content: 'Analyze a large repository',
+          timestamp: 1_773_281_732,
+        },
+      ],
+    });
+    const actions = createHistoryActions(h.set as never, h.get as never);
+
+    invokeIpcMock.mockResolvedValueOnce({
+      success: true,
+      result: {
+        messages: [
+          {
+            role: 'tool_result',
+            content: 'read README.md',
+            timestamp: 1_773_281_733,
+          },
+        ],
+      },
+    });
+
+    await actions.loadHistory(true);
+
+    // Tool-result role messages are hidden from the UI, but their presence is
+    // still enough to prove the run has started; do not append the optimistic
+    // prompt at the tail and create a second user boundary.
+    expect(h.read().messages.map((message) => message.content)).toEqual([
+      'Analyze a large repository',
     ]);
   });
 });

@@ -186,6 +186,13 @@ function normalizeComparableUserText(content: unknown): string {
     .trim();
 }
 
+function hasOptimisticComparableUserText(candidate: RawMessage, optimistic: RawMessage): boolean {
+  if (candidate.role !== 'user') return false;
+  const optimisticText = normalizeComparableUserText(optimistic.content);
+  if (!optimisticText) return false;
+  return normalizeComparableUserText(candidate.content) === optimisticText;
+}
+
 function getComparableAttachmentSignature(message: Pick<RawMessage, '_attachedFiles'>): string {
   const files = (message._attachedFiles || [])
     .map((file) => file.filePath || `${file.fileName}|${file.mimeType}|${file.fileSize}`)
@@ -302,6 +309,176 @@ function getLatestOptimisticUserMessage(messages: RawMessage[], userTimestampMs:
   return [...messages].reverse().find(
     (message) => message.role === 'user' && (!message.timestamp || Math.abs(toMs(message.timestamp) - userTimestampMs) < 5000),
   );
+}
+
+function hasCompatibleOptimisticDuplicateSignature(candidate: RawMessage, optimistic: RawMessage): boolean {
+  if (!hasOptimisticComparableUserText(candidate, optimistic)) return false;
+
+  const candidateAttachments = getComparableAttachmentSignature(candidate);
+  const optimisticAttachments = getComparableAttachmentSignature(optimistic);
+  if (candidateAttachments && optimisticAttachments && candidateAttachments !== optimisticAttachments) {
+    return false;
+  }
+  return true;
+}
+
+function isAssistantOrToolActivity(message: RawMessage): boolean {
+  return message.role === 'assistant' || isToolResultRole(message.role);
+}
+
+function isNearActiveUserTimestamp(message: RawMessage, activeUserTimestampMs: number): boolean {
+  if (message.timestamp == null) return false;
+  return Math.abs(toMs(message.timestamp) - activeUserTimestampMs) < 5000;
+}
+
+function isNearActiveTimestampValue(timestamp: number | undefined, activeUserTimestampMs: number): boolean {
+  if (timestamp == null) return false;
+  return Math.abs(toMs(timestamp) - activeUserTimestampMs) < 5000;
+}
+
+function isAtOrAfterActiveUserTimestamp(message: RawMessage, activeUserTimestampMs: number): boolean {
+  if (message.timestamp == null) return false;
+  return toMs(message.timestamp) >= activeUserTimestampMs;
+}
+
+function findPostSendActivityInsertionIndex(messages: RawMessage[], activeUserTimestampMs: number): number {
+  return messages.findIndex((message, index) => {
+    if (!isAssistantOrToolActivity(message)) return false;
+    if (message.timestamp != null) return toMs(message.timestamp) >= activeUserTimestampMs;
+
+    const hasEarlierUser = messages
+      .slice(0, index)
+      .some((candidate) => candidate.role === 'user');
+    return !hasEarlierUser;
+  });
+}
+
+function isActiveOptimisticUserMatch(
+  message: RawMessage,
+  optimistic: RawMessage,
+  activeUserTimestampMs: number,
+  visibleMessages: RawMessage[],
+  messageIndex: number,
+): boolean {
+  if (!matchesOptimisticUserMessage(message, optimistic, activeUserTimestampMs)) return false;
+  if (isNearActiveUserTimestamp(message, activeUserTimestampMs)) return true;
+
+  // Timestamp-less same-text user messages are ambiguous: they may be the
+  // current Gateway echo, or they may be an old repeated prompt. Trust them
+  // only when they are the sole loaded visible message, or when later visible
+  // activity has a reliable post-send timestamp.
+  if (message.timestamp != null) return false;
+  if (visibleMessages.length === 1) return true;
+
+  const hasEarlierUser = visibleMessages
+    .slice(0, messageIndex)
+    .some((candidate) => candidate.role === 'user');
+  if (hasEarlierUser) return false;
+
+  return visibleMessages
+    .slice(messageIndex + 1)
+    .some((candidate) => isAssistantOrToolActivity(candidate) && isAtOrAfterActiveUserTimestamp(candidate, activeUserTimestampMs));
+}
+
+function coalesceActiveOptimisticUserDuplicates(
+  messages: RawMessage[],
+  optimistic: RawMessage,
+  activeUserTimestampMs: number,
+): RawMessage[] {
+  const candidates = messages
+    .map((message, index) => ({ message, index }))
+    .filter(({ message }) => hasCompatibleOptimisticDuplicateSignature(message, optimistic));
+
+  const nearCandidates = candidates.filter(({ message }) => isNearActiveUserTimestamp(message, activeUserTimestampMs));
+  if (nearCandidates.length <= 1) return messages;
+
+  const optimisticTimestamp = typeof optimistic.timestamp === 'number'
+    ? optimistic.timestamp
+    : activeUserTimestampMs;
+  let keepIndex = nearCandidates[0]!.index;
+  let keepDistance = Math.abs(toMs(nearCandidates[0]!.message.timestamp!) - activeUserTimestampMs);
+  let keepIsOptimisticEcho = isNearActiveTimestampValue(nearCandidates[0]!.message.timestamp, toMs(optimisticTimestamp));
+  for (const { message, index } of nearCandidates.slice(1)) {
+    const distance = Math.abs(toMs(message.timestamp!) - activeUserTimestampMs);
+    const isOptimisticEcho = isNearActiveTimestampValue(message.timestamp, toMs(optimisticTimestamp));
+    if (
+      (isOptimisticEcho && !keepIsOptimisticEcho)
+      || (isOptimisticEcho === keepIsOptimisticEcho && distance < keepDistance)
+      || (isOptimisticEcho === keepIsOptimisticEcho && distance === keepDistance && index > keepIndex)
+    ) {
+      keepIndex = index;
+      keepDistance = distance;
+      keepIsOptimisticEcho = isOptimisticEcho;
+    }
+  }
+
+  const dropIndexes = new Set(
+    nearCandidates
+      .map(({ index }) => index)
+      .filter((index) => index !== keepIndex),
+  );
+
+  return messages.filter((_, index) => !dropIndexes.has(index));
+}
+
+function mergeOptimisticUserIntoLoadedHistory(
+  enrichedMessages: RawMessage[],
+  activityMessages: RawMessage[],
+  currentMessages: RawMessage[],
+  sending: boolean,
+  lastUserMessageAt: number | null,
+): RawMessage[] {
+  // Preserve the optimistic user message during an active send only while
+  // history has not yet advanced into assistant/tool activity. Appending it
+  // after partial activity creates a fresh user boundary in the UI, splitting
+  // one run into duplicate prompt segments.
+  // Transitional fallback until OpenClaw session.message/messageSeq becomes
+  // the primary authoritative append path. Keep this conservative: prefer
+  // preserving the active optimistic user over inferring too much from partial
+  // chat.history snapshots.
+  let finalMessages = enrichedMessages;
+  if (sending && lastUserMessageAt) {
+    const userMsMs = toMs(lastUserMessageAt);
+    const optimistic = getLatestOptimisticUserMessage(currentMessages, userMsMs);
+    const hasMatchingUser = optimistic
+      ? enrichedMessages.some((message, index) => isActiveOptimisticUserMatch(message, optimistic, userMsMs, enrichedMessages, index))
+      : false;
+    const hasSameUserText = optimistic
+      ? enrichedMessages.some(
+        (message) => hasCompatibleOptimisticDuplicateSignature(message, optimistic) && isNearActiveUserTimestamp(message, userMsMs),
+      )
+      : false;
+    const postSendActivityIndex = findPostSendActivityInsertionIndex(enrichedMessages, userMsMs);
+    const hasFilteredPostSendAssistantOrToolActivity = activityMessages.some((message) => {
+      if (!isAssistantOrToolActivity(message)) return false;
+      if (message.timestamp == null) return enrichedMessages.length === 0;
+      return isAtOrAfterActiveUserTimestamp(message, userMsMs);
+    });
+    const hasPostSendAssistantOrToolActivity = postSendActivityIndex >= 0
+      || hasFilteredPostSendAssistantOrToolActivity;
+    const hasOnlyFilteredPostSendActivity = postSendActivityIndex < 0
+      && hasFilteredPostSendAssistantOrToolActivity;
+
+    if (optimistic && !hasMatchingUser && !hasSameUserText) {
+      if (!hasPostSendAssistantOrToolActivity || hasOnlyFilteredPostSendActivity) {
+        finalMessages = [...enrichedMessages, optimistic];
+      } else if (postSendActivityIndex >= 0) {
+        finalMessages = [
+          ...enrichedMessages.slice(0, postSendActivityIndex),
+          optimistic,
+          ...enrichedMessages.slice(postSendActivityIndex),
+        ];
+      } else if (enrichedMessages.length === 0) {
+        finalMessages = [optimistic];
+      }
+    }
+
+    if (optimistic) {
+      finalMessages = coalesceActiveOptimisticUserDuplicates(finalMessages, optimistic, userMsMs);
+    }
+  }
+
+  return finalMessages;
 }
 
 function upsertImageCacheEntry(filePath: string, file: Omit<AttachedFileMeta, 'filePath'>): void {
@@ -1354,12 +1531,14 @@ export {
   hasPendingToolUse,
   isToolOnlyMessage,
   normalizeStreamingMessage,
+  hasOptimisticComparableUserText,
   matchesOptimisticUserMessage,
   rememberPendingOptimisticUserMessage,
   clearPendingOptimisticUserMessages,
   mergePendingOptimisticUserMessages,
   snapshotStreamingAssistantMessage,
   getLatestOptimisticUserMessage,
+  mergeOptimisticUserIntoLoadedHistory,
   setHistoryPollTimer,
   hasErrorRecoveryTimer,
   setErrorRecoveryTimer,

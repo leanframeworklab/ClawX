@@ -5,15 +5,14 @@ import {
   clearHistoryPoll,
   enrichWithCachedImages,
   enrichWithToolResultFiles,
-  getLatestOptimisticUserMessage,
-  getMessageErrorMessage,
-  getMessageStopReason,
-  getMessageText,
   isInternalMessage,
   isToolResultRole,
   loadMissingPreviews,
-  matchesOptimisticUserMessage,
+  mergeOptimisticUserIntoLoadedHistory,
   mergePendingOptimisticUserMessages,
+  getMessageErrorMessage,
+  getMessageStopReason,
+  getMessageText,
   toMs,
 } from './helpers';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './cron-session-utils';
@@ -107,21 +106,17 @@ export function createHistoryActions(
         // Restore file attachments for user/assistant messages (from cache + text patterns)
         const enrichedMessages = enrichWithCachedImages(filteredMessages);
 
-        // Preserve optimistic user messages independently from sending state.
-        // Gateway phase=end can clear sending before chat.history has persisted
-        // the user turn; without this, an early quiet reload briefly removes it.
-        let finalMessages = mergePendingOptimisticUserMessages(currentSessionKey, enrichedMessages);
-        const userMsgAt = get().lastUserMessageAt;
-        if (get().sending && userMsgAt) {
-          const userMsMs = toMs(userMsgAt);
-          const optimistic = getLatestOptimisticUserMessage(get().messages, userMsMs);
-          const hasMatchingUser = optimistic
-            ? finalMessages.some((message) => matchesOptimisticUserMessage(message, optimistic, userMsMs))
-            : false;
-          if (optimistic && !hasMatchingUser) {
-            finalMessages = [...finalMessages, optimistic];
-          }
-        }
+        // Preserve pending optimistic users even after sending is cleared, then
+        // merge the active optimistic user through the shared helper so the
+        // monolithic store and split-store tests cannot drift.
+        const pendingMergedMessages = mergePendingOptimisticUserMessages(currentSessionKey, enrichedMessages);
+        const finalMessages = mergeOptimisticUserIntoLoadedHistory(
+          pendingMergedMessages,
+          messagesWithToolImages,
+          get().messages,
+          get().sending,
+          get().lastUserMessageAt,
+        );
 
         const { pendingFinal, lastUserMessageAt, sending: isSendingNow } = get();
         const userMsTs = lastUserMessageAt ? toMs(lastUserMessageAt) : 0;
