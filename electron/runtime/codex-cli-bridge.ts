@@ -12,6 +12,7 @@ type CodexBridgeOptions = {
   sessionsDir: string;
   workDir?: string;
   mode?: 'suggest' | 'auto-edit' | 'full-auto' | 'yolo';
+  proxyEnvProvider?: () => Record<string, string> | Promise<Record<string, string>>;
 };
 
 export type CodexBridgeSendResult = {
@@ -138,6 +139,7 @@ export class CodexCliBridge {
   private readonly sessionsDir: string;
   private readonly workDir: string;
   private readonly mode: CodexBridgeOptions['mode'];
+  private readonly proxyEnvProvider: NonNullable<CodexBridgeOptions['proxyEnvProvider']>;
   private providerProfile: CodexProviderProfile | null = null;
 
   constructor(options: CodexBridgeOptions) {
@@ -145,6 +147,7 @@ export class CodexCliBridge {
     this.sessionsDir = options.sessionsDir;
     this.workDir = options.workDir || process.env.CLAWX_CODEX_WORKDIR || process.cwd();
     this.mode = options.mode || 'full-auto';
+    this.proxyEnvProvider = options.proxyEnvProvider ?? defaultProxyEnvProvider;
   }
 
   getSessionsDir(): string {
@@ -357,11 +360,13 @@ export class CodexCliBridge {
     options: { captureStdout?: boolean; env?: Record<string, string> } = {},
   ): Promise<{ success: boolean; stdout: string; stderr: string; error?: string }> {
     await mkdir(this.sessionsDir, { recursive: true });
+    const proxyEnv = await this.proxyEnvProvider();
     return new Promise((resolve) => {
       const child = spawn(this.codexPath, args, {
         cwd: this.workDir,
         env: {
           ...process.env,
+          ...proxyEnv,
           ...(options.env ?? {}),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -391,5 +396,17 @@ export class CodexCliBridge {
         });
       });
     });
+  }
+}
+
+async function defaultProxyEnvProvider(): Promise<Record<string, string>> {
+  try {
+    const [{ getAllSettings }, { buildProxyEnv }] = await Promise.all([
+      import('@electron/utils/store'),
+      import('@electron/utils/proxy'),
+    ]);
+    return buildProxyEnv(await getAllSettings());
+  } catch {
+    return {};
   }
 }

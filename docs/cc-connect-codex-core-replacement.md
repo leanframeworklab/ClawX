@@ -80,6 +80,7 @@ The cc-connect runtime converts the active ClawX provider account into a Codex l
 - OpenAI OAuth browser accounts: `codex exec --model <model>` with `CODEX_HOME` pointing at `app userData/runtimes/cc-connect/codex-home/`. ClawX writes a managed Codex `auth.json` from the stored OpenAI OAuth access, refresh, optional ID token, and account id.
 - Ollama local accounts: `codex exec --oss --local-provider ollama --model <model>`.
 - Unsupported vendors return a stable unsupported error before spawning Codex and do not mutate OpenClaw configuration.
+- Codex child processes inherit ClawX proxy settings as `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` environment variables, matching Gateway launch behavior.
 
 `provider-profile.json` is intentionally public/diagnostic: it records provider id, model, args, and environment key names only. It must not contain API keys or OAuth token values.
 
@@ -116,6 +117,7 @@ Current implemented capability flags for cc-connect mode:
 - Unit tests prove sessions/history/delete operate from managed storage.
 - Unit tests prove Doctor includes Codex CLI diagnostics.
 - Unit tests prove OpenAI and Ollama provider accounts convert to Codex launch profiles without writing secrets to disk.
+- Unit tests prove cc-connect/Codex child processes inherit ClawX proxy environment values.
 - E2E tests prove a ClawX-managed cc-connect runtime can start from Settings-seeded config, write managed `config.toml`, send a real UI chat through the Codex bridge, and read back managed history through Host API.
 - E2E tests prove an Ollama provider account is converted into `codex exec --oss --local-provider ollama --model <model>`.
 - Typecheck passes.

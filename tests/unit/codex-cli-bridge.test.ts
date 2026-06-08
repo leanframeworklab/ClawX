@@ -172,6 +172,66 @@ describe('CodexCliBridge', () => {
     }));
   });
 
+  it('passes ClawX proxy settings to codex child processes', async () => {
+    const child = createChild();
+    spawnMock.mockReturnValueOnce(child);
+    const { CodexCliBridge } = await import('@electron/runtime/codex-cli-bridge');
+    const bridge = new CodexCliBridge({
+      codexPath: '/mock/codex',
+      sessionsDir: tempDir,
+      workDir: '/tmp/project',
+      proxyEnvProvider: () => ({
+        HTTP_PROXY: 'http://127.0.0.1:7890',
+        HTTPS_PROXY: 'http://127.0.0.1:7891',
+        ALL_PROXY: 'socks5://127.0.0.1:7892',
+        http_proxy: 'http://127.0.0.1:7890',
+        https_proxy: 'http://127.0.0.1:7891',
+        all_proxy: 'socks5://127.0.0.1:7892',
+        NO_PROXY: 'localhost,127.0.0.1',
+        no_proxy: 'localhost,127.0.0.1',
+      }),
+    });
+    bridge.setProviderProfile({
+      providerId: 'openai-main',
+      vendorId: 'openai',
+      model: 'gpt-5.5',
+      modelRef: 'openai/gpt-5.5',
+      supported: true,
+      codexArgs: ['--model', 'gpt-5.5'],
+      env: { OPENAI_API_KEY: 'sk-test', CODEX_HOME: '/tmp/clawx-codex-home' },
+      secretAvailable: true,
+      updatedAt: '2026-06-07T00:00:00.000Z',
+    });
+
+    const sendPromise = bridge.send({
+      sessionKey: 'agent:main:main',
+      message: 'hello',
+      idempotencyKey: 'idem-1',
+    });
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledOnce());
+    child.writeStdout(JSON.stringify({
+      item: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ok' }],
+      },
+    }) + '\n');
+    child.emit('exit', 0);
+
+    await expect(sendPromise).resolves.toMatchObject({
+      assistantMessage: { role: 'assistant', content: 'ok' },
+    });
+    expect(spawnMock).toHaveBeenCalledWith('/mock/codex', expect.any(Array), expect.objectContaining({
+      env: expect.objectContaining({
+        OPENAI_API_KEY: 'sk-test',
+        CODEX_HOME: '/tmp/clawx-codex-home',
+        HTTP_PROXY: 'http://127.0.0.1:7890',
+        HTTPS_PROXY: 'http://127.0.0.1:7891',
+        ALL_PROXY: 'socks5://127.0.0.1:7892',
+        NO_PROXY: 'localhost,127.0.0.1',
+      }),
+    }));
+  });
+
   it('rejects unsupported provider profiles before spawning codex', async () => {
     const { CodexCliBridge } = await import('@electron/runtime/codex-cli-bridge');
     const bridge = new CodexCliBridge({

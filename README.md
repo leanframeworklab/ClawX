@@ -190,7 +190,7 @@ The wizard preselects your system language when it is supported, and falls back 
 
 ### Proxy Settings
 
-ClawX includes built-in proxy settings for environments where Electron, the OpenClaw Gateway, or channels such as Telegram need to reach the internet through a local proxy client.
+ClawX includes built-in proxy settings for environments where Electron, the OpenClaw Gateway, the optional cc-connect/Codex runtime, or channels such as Telegram need to reach the internet through a local proxy client.
 
 Open **Settings → Gateway → Proxy** and configure:
 
@@ -211,6 +211,7 @@ Notes:
 - A bare `host:port` value is treated as HTTP.
 - If advanced proxy fields are left empty, ClawX falls back to `Proxy Server`.
 - Saving proxy settings reapplies Electron networking immediately and restarts the Gateway automatically.
+- In cc-connect runtime mode, Codex child processes inherit the same `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and bypass environment values.
 - ClawX also syncs the proxy to OpenClaw's Telegram channel config when Telegram is enabled.
 - Gateway restarts preserve an existing Telegram channel proxy if ClawX proxy is currently disabled.
 - To explicitly clear Telegram channel proxy from OpenClaw config, save proxy settings with proxy disabled.

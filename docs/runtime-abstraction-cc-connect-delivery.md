@@ -48,6 +48,7 @@ Runtime/backend:
 - `OpenClawRuntimeProvider` wrapping existing Gateway behavior.
 - `CcConnectRuntimeProvider` with managed config, provider profile sync, binary path resolution, process lifecycle, logs, status, unsupported fallbacks, and Doctor diagnose.
 - OpenAI OAuth/Codex mode writes a managed `CODEX_HOME/auth.json` under app userData and passes `CODEX_HOME` to Codex without relying on user `~/.codex`.
+- Codex child processes in cc-connect mode inherit ClawX proxy environment values, including `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and bypass rules.
 - Runtime-aware host services while preserving legacy gateway IPC.
 
 UI:
