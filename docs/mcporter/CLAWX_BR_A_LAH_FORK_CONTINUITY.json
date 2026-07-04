@@ -1,0 +1,60 @@
+{
+  "mission": "CLAWX_BR_A_LAH_FORK_CONTINUITY_RECORD",
+  "source_mission": "CLAWX_BR_A_ADOPT_PATCH_ON_LAH_FORK_AND_MEMORY_LOCK",
+  "repo": "leanframeworklab/ClawX",
+  "upstream_reference_repo": "ValueCell-ai/ClawX",
+  "local_workspace": "/tmp/clawx-runtime-safe-mode",
+  "source_commit": "8557a68",
+  "source_branch": "feat/clawx-external-gateway-safe-mode",
+  "fork_remote": "fork",
+  "fork_main_remote": "fork/main",
+  "merge": {
+    "attempted": true,
+    "merged": true,
+    "merge_commit": "a10ef25",
+    "merge_parent": "2a1e2ad",
+    "feature_tip": "6217fa7"
+  },
+  "post_merge_verify": {
+    "completed": true,
+    "checks": [
+      "git merge-base --is-ancestor 8557a68 HEAD",
+      "git merge-base --is-ancestor f264df0 HEAD",
+      "git merge-base --is-ancestor 6217fa7 HEAD",
+      "git diff --check HEAD^1 HEAD"
+    ],
+    "result": "Local merge verified; pushed to leanframeworklab/ClawX main"
+  },
+  "push": {
+    "completed": true,
+    "remote": "fork",
+    "branch": "main",
+    "result": "https://github.com/leanframeworklab/ClawX.git main updated"
+  },
+  "memory_lock": {
+    "completed": true,
+    "reason": "Post-merge verification passed on the LAH fork main branch"
+  },
+  "preservation_artifacts": {
+    "format_patch": "/home/deploy/lah-stack-artifacts/clawx-br-a-recovery/0001-feat-add-external-gateway-safe-mode-for-LAH.patch",
+    "bundle": "/home/deploy/lah-stack-artifacts/clawx-br-a-recovery/clawx-br-a-8557a68.bundle",
+    "diff": "/home/deploy/lah-stack-artifacts/clawx-br-a-recovery/clawx-br-a-8557a68.diff"
+  },
+  "hard_prohibitions_respected": {
+    "no_pnpm_install": true,
+    "no_npm_install": true,
+    "no_pnpm_run_init": true,
+    "no_electron_launch": true,
+    "no_openclaw_launch": true,
+    "no_gateway_start": true,
+    "no_download": true,
+    "no_production_openclaw_write": true,
+    "no_upstream_merge": true
+  },
+  "final_verdict": "CLAWX_BR_A_EXTERNAL_GATEWAY_SAFE_MODE_PATCH_READY_ON_LAH_FORK",
+  "recommended_next_br": "CLAWX_BR_B_ISOLATED_ENV_AND_CONTROLLED_DEPS_ON_LAH_FORK",
+  "notes": [
+    "Upstream PR #1143 remains untouched.",
+    "LAH fork main is the source of truth for this runtime patch."
+  ]
+}
