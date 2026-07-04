@@ -242,20 +242,19 @@ export async function findExistingGatewayProcess(options: {
 }): Promise<{ port: number; externalToken?: string } | null> {
   const { port, ownedPid } = options;
 
-  if (!isGatewayKillOnConflictEnabled()) {
-    logger.info(`Skipping orphan Gateway cleanup for port ${port} because kill-on-conflict is disabled`);
-    return null;
-  }
-
   try {
     try {
       const pids = await getListeningProcessIds(port);
       if (pids.length > 0 && (!ownedPid || !pids.includes(String(ownedPid)))) {
-        await terminateOrphanedProcessIds(port, pids);
-        if (process.platform === 'win32') {
-          await waitForPortFree(port, 10000);
+        if (isGatewayKillOnConflictEnabled()) {
+          await terminateOrphanedProcessIds(port, pids);
+          if (process.platform === 'win32') {
+            await waitForPortFree(port, 10000);
+          }
+          return null;
         }
-        return null;
+
+        logger.info(`Skipping orphan Gateway cleanup for port ${port} because kill-on-conflict is disabled`);
       }
     } catch (err) {
       logger.warn('Error checking for existing process on port:', err);

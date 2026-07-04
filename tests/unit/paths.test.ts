@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const testUserDataDir = '/tmp/clawx-paths-test-user-data';
 const testHomeDir = '/tmp/clawx-paths-test-home';
@@ -44,5 +47,19 @@ describe('path utilities', () => {
 
     expect(getOpenClawConfigDir()).toBe('/tmp/clawx-paths-test-home/.openclaw');
     expect(getOpenClawConfigDir()).not.toContain('/home/deploy/.openclaw');
+  });
+
+  it('creates missing directories with ensureDir', async () => {
+    const { ensureDir } = await import('@electron/utils/paths');
+    const root = mkdtempSync(join(tmpdir(), 'clawx-ensure-dir-'));
+    const nested = join(root, 'fresh', 'user-data');
+
+    try {
+      expect(existsSync(nested)).toBe(false);
+      ensureDir(nested);
+      expect(existsSync(nested)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

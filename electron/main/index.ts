@@ -4,6 +4,7 @@
  */
 import { app, BrowserWindow, nativeImage, session } from 'electron';
 import { join } from 'path';
+import { ensureDir } from '../utils/paths';
 import { GatewayManager } from '../gateway/manager';
 import { registerIpcHandlers } from './ipc-handlers';
 import { HostApiRegistry } from './ipc/host-invoke';
@@ -64,6 +65,7 @@ if (requestedRemoteDebuggingPort) {
 }
 
 if (requestedUserDataDir) {
+  ensureDir(requestedUserDataDir);
   app.setPath('userData', requestedUserDataDir);
 }
 
