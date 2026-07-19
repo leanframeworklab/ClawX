@@ -32,6 +32,22 @@ export function getExternalGatewayUrl(): string {
   return process.env.CLAWX_EXTERNAL_GATEWAY_URL?.trim() || DEFAULT_EXTERNAL_GATEWAY_URL;
 }
 
+/** Apply the persisted Gateway choice before GatewayManager starts. */
+export function applyPersistedGatewaySettings(settings: {
+  externalGatewayEnabled: boolean;
+  externalGatewayUrl: string;
+}): void {
+  const externalEnabled = settings.externalGatewayEnabled === true;
+  process.env.CLAWX_EXTERNAL_GATEWAY_ENABLED = externalEnabled ? 'true' : 'false';
+  process.env.CLAWX_GATEWAY_SPAWN_ENABLED = externalEnabled ? 'false' : 'true';
+
+  if (externalEnabled && settings.externalGatewayUrl.trim()) {
+    process.env.CLAWX_EXTERNAL_GATEWAY_URL = settings.externalGatewayUrl.trim();
+  } else {
+    delete process.env.CLAWX_EXTERNAL_GATEWAY_URL;
+  }
+}
+
 export function isExternalGatewayEnabled(): boolean {
   if (isLahSafeMode()) {
     return true;

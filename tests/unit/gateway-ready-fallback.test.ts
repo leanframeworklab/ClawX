@@ -27,6 +27,21 @@ vi.mock('@electron/gateway/startup-orchestrator', () => ({
   }),
 }));
 
+vi.mock('@electron/gateway/config-sync', () => ({
+  prepareGatewayLaunchContext: vi.fn(async () => ({
+    appSettings: {},
+    openclawDir: '/tmp',
+    entryScript: '/tmp/openclaw.mjs',
+    gatewayArgs: [],
+    forkEnv: {},
+    mode: 'dev',
+    binPathExists: false,
+    loadedProviderKeyCount: 0,
+    proxySummary: 'disabled',
+    channelStartupSummary: 'none',
+  })),
+}));
+
 describe('GatewayManager gatewayReady fallback', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -101,6 +116,30 @@ describe('GatewayManager gatewayReady fallback', () => {
     const readyUpdate = statusUpdates.find((u) => u.gatewayReady === true);
     expect(readyUpdate).toBeDefined();
     expect(rpcSpy).toHaveBeenCalledWith('system-presence', {}, 5_000);
+  });
+
+  it('accepts an authenticated external Gateway without system-presence', async () => {
+    process.env.CLAWX_EXTERNAL_GATEWAY_ENABLED = '1';
+    vi.resetModules();
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    const rpcSpy = vi.spyOn(manager as unknown as { rpc: (method: string, params?: unknown, timeoutMs?: number) => Promise<unknown> }, 'rpc')
+      .mockRejectedValue(new Error('Unsupported Gateway method: system-presence'));
+
+    const stateController = (manager as unknown as { stateController: { setStatus: (u: Record<string, unknown>) => void } }).stateController;
+    stateController.setStatus({ state: 'running', connectedAt: Date.now() });
+
+    const statusUpdates: Array<{ gatewayReady?: boolean }> = [];
+    manager.on('status', (status: { gatewayReady?: boolean }) => {
+      statusUpdates.push({ gatewayReady: status.gatewayReady });
+    });
+
+    (manager as unknown as { scheduleGatewayReadyFallback: () => void }).scheduleGatewayReadyFallback();
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(statusUpdates.find((u) => u.gatewayReady === true)).toBeDefined();
+    expect(rpcSpy).not.toHaveBeenCalled();
+    delete process.env.CLAWX_EXTERNAL_GATEWAY_ENABLED;
   });
 
   it('keeps gatewayReady=false when fallback RPC router probe fails', async () => {

@@ -43,7 +43,8 @@ vi.mock('@electron/utils/logger', () => ({
   },
 }));
 
-vi.mock('@electron/utils/runtime-flags', () => ({
+vi.mock('@electron/utils/runtime-flags', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@electron/utils/runtime-flags')>()),
   isGatewaySpawnEnabled: () => false,
 }));
 
@@ -104,5 +105,31 @@ describe('gateway external mode', () => {
       onExit: vi.fn(),
       onError: vi.fn(),
     })).rejects.toThrow('Gateway spawning is disabled in external gateway / safe mode');
+  });
+
+  it('applies persisted external Gateway settings before startup', async () => {
+    const originalEnv = {
+      enabled: process.env.CLAWX_EXTERNAL_GATEWAY_ENABLED,
+      url: process.env.CLAWX_EXTERNAL_GATEWAY_URL,
+      spawn: process.env.CLAWX_GATEWAY_SPAWN_ENABLED,
+    };
+    const { applyPersistedGatewaySettings, isExternalGatewayEnabled, isGatewaySpawnEnabled, getExternalGatewayUrl } =
+      await import('@electron/utils/runtime-flags');
+
+    applyPersistedGatewaySettings({
+      externalGatewayEnabled: true,
+      externalGatewayUrl: 'ws://127.0.0.1:4000/gateway',
+    });
+
+    expect(isExternalGatewayEnabled()).toBe(true);
+    expect(isGatewaySpawnEnabled()).toBe(false);
+    expect(getExternalGatewayUrl()).toBe('ws://127.0.0.1:4000/gateway');
+
+    if (originalEnv.enabled === undefined) delete process.env.CLAWX_EXTERNAL_GATEWAY_ENABLED;
+    else process.env.CLAWX_EXTERNAL_GATEWAY_ENABLED = originalEnv.enabled;
+    if (originalEnv.url === undefined) delete process.env.CLAWX_EXTERNAL_GATEWAY_URL;
+    else process.env.CLAWX_EXTERNAL_GATEWAY_URL = originalEnv.url;
+    if (originalEnv.spawn === undefined) delete process.env.CLAWX_GATEWAY_SPAWN_ENABLED;
+    else process.env.CLAWX_GATEWAY_SPAWN_ENABLED = originalEnv.spawn;
   });
 });

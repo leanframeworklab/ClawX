@@ -16,7 +16,7 @@ import { appUpdater, registerUpdateHandlers } from './updater';
 import { logger } from '../utils/logger';
 import { warmupNetworkOptimization } from '../utils/uv-env';
 import { initTelemetry } from '../utils/telemetry';
-import { getRequestedUserDataDir } from '../utils/runtime-flags';
+import { applyPersistedGatewaySettings, getRequestedUserDataDir } from '../utils/runtime-flags';
 import { openExternalUrl } from '../utils/external-links';
 
 import { ClawHubService } from '../gateway/clawhub';
@@ -526,6 +526,10 @@ async function initialize(): Promise<void> {
   const gatewayAutoStart = await getSetting('gatewayAutoStart');
   if (!isE2EMode && gatewayAutoStart) {
     try {
+      applyPersistedGatewaySettings({
+        externalGatewayEnabled: await getSetting('externalGatewayEnabled'),
+        externalGatewayUrl: await getSetting('externalGatewayUrl'),
+      });
       await syncAllProviderAuthToRuntime();
       logger.debug('Auto-starting Gateway...');
       await gatewayManager.start();

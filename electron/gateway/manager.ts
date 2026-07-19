@@ -865,6 +865,21 @@ export class GatewayManager extends EventEmitter {
       return;
     }
 
+    // An authenticated external Gateway may intentionally expose only the
+    // governed read-only RPC surface, which does not include system-presence.
+    // The WebSocket handshake is the readiness proof for that mode.
+    if (isExternalGatewayEnabled()) {
+      this.capabilityMonitor.recordCoreProbe({
+        ok: true,
+        checkedAt: Date.now(),
+        durationMs: 0,
+      });
+      logger.info('Gateway ready fallback accepted authenticated external Gateway without system-presence probe');
+      this.resetGatewayReadyFallback();
+      this.setStatus({ gatewayReady: true });
+      return;
+    }
+
     logger.info('Gateway ready fallback triggered; probing RPC router before marking ready');
     const startedAt = Date.now();
     try {
