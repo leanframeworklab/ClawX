@@ -1,6 +1,9 @@
 import type {
   AgentCreatePayload,
   AgentUpdatePayload,
+  AcpTraceRecordPayload,
+  AttachmentFileRef,
+  AttachmentSourceRef,
   ChannelAccountsPayload,
   ChannelSaveConfigPayload,
   ChannelTargetsPayload,
@@ -20,6 +23,8 @@ import type {
   ProviderOAuthRequestPayload,
   ProviderUpdateWithKeyPayload,
   ProviderValidationPayload,
+  ReadAttachmentBinaryPayload,
+  ResolveAttachmentPayload,
   SaveImagePayload,
   SettingsKey,
   SettingsSnapshot,
@@ -30,11 +35,24 @@ import type {
   SkillUpdateConfigPayload,
   SkillUpdatePayload,
   UpdateChannel,
+  WorkspaceContextInput,
+  WorkspaceFileRef,
 } from '@shared/host-api/contract';
+import type {
+  AcpChatCancelPayload,
+  AcpChatLoadPayload,
+  AcpChatPromptPayload,
+  AcpChatRespondPermissionPayload,
+} from '@shared/acp-chat/types';
 import type { CronJobCreateInput, CronJobUpdateInput } from '@shared/types/cron';
 import { invokeHost } from './host-api-client';
 
 export type {
+  AttachmentAccessError,
+  AttachmentFileRef,
+  AttachmentRemoteRef,
+  AttachmentReadError,
+  AttachmentSourceRef,
   ChannelAccountsResult,
   ChannelCredentialValidationResult,
   ChannelFormValuesResult,
@@ -59,9 +77,13 @@ export type {
   OpenClawCliCommandResult,
   OpenClawDoctorResult,
   OpenClawStatusResult,
+  OpenAttachmentResult,
   ProviderAccountKeyInfo,
   ProviderDefaultAccountResult,
   ProviderValidationResult,
+  ReadAttachmentBinaryResult,
+  ReadAttachmentTextResult,
+  ResolveAttachmentResult,
   SessionHistoryResult,
   SessionLabelSummary,
   SessionSummariesResult,
@@ -71,6 +93,8 @@ export type {
   SkillsStatusResult,
   StagedFileResult,
   UsageHistoryEntry,
+  WorkspaceContextInput,
+  WorkspaceFileRef,
 } from '@shared/host-api/contract';
 
 export const hostApi = {
@@ -197,6 +221,8 @@ export const hostApi = {
   },
   diagnostics: {
     gatewaySnapshot: () => invokeHost('diagnostics', 'gatewaySnapshot'),
+    acpTrace: () => invokeHost('diagnostics', 'acpTrace'),
+    recordAcpTrace: (input: AcpTraceRecordPayload) => invokeHost('diagnostics', 'recordAcpTrace', input),
   },
   providers: {
     list: () => invokeHost('providers', 'list'),
@@ -270,6 +296,20 @@ export const hostApi = {
     listTree: (path: string, opts?: FilePreviewTreeOptions) => (
       invokeHost('files', 'listTree', { path, opts })
     ),
+    resolveWorkspaceContext: (input: WorkspaceContextInput) => (
+      invokeHost('files', 'resolveWorkspaceContext', input)
+    ),
+    readWorkspaceText: (ref: WorkspaceFileRef) => invokeHost('files', 'readWorkspaceText', ref),
+    readWorkspaceBinary: (input: WorkspaceFileRef & { maxBytes?: number }) => (
+      invokeHost('files', 'readWorkspaceBinary', input)
+    ),
+    statWorkspaceFile: (ref: WorkspaceFileRef) => invokeHost('files', 'statWorkspaceFile', ref),
+    resolveAttachment: (input: ResolveAttachmentPayload) => invokeHost('files', 'resolveAttachment', input),
+    readAttachmentText: (ref: AttachmentFileRef) => invokeHost('files', 'readAttachmentText', ref),
+    readAttachmentBinary: (input: ReadAttachmentBinaryPayload) => (
+      invokeHost('files', 'readAttachmentBinary', input)
+    ),
+    openAttachment: (ref: AttachmentSourceRef) => invokeHost('files', 'openAttachment', ref),
   },
   media: {
     thumbnails: (input: { paths: MediaThumbnailEntry[] }) => invokeHost('media', 'thumbnails', input),
@@ -295,6 +335,12 @@ export const hostApi = {
   },
   chat: {
     sendWithMedia: (input: ChatSendWithMediaPayload) => invokeHost('chat', 'sendWithMedia', input),
+    loadAcpSession: (input: AcpChatLoadPayload) => invokeHost('chat', 'loadAcpSession', input),
+    sendAcpPrompt: (input: AcpChatPromptPayload) => invokeHost('chat', 'sendAcpPrompt', input),
+    cancelAcpSession: (input: AcpChatCancelPayload) => invokeHost('chat', 'cancelAcpSession', input),
+    respondAcpPermission: (input: AcpChatRespondPermissionPayload) => (
+      invokeHost('chat', 'respondAcpPermission', input)
+    ),
   },
   cron: {
     list: () => invokeHost('cron', 'list'),

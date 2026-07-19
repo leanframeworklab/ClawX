@@ -1,3 +1,5 @@
+// @vitest-environment node
+
 import { mkdir, readFile, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -961,6 +963,59 @@ describe('syncProviderConfigToOpenClaw', () => {
         id: 'private-model-x',
         input: ['text'],
       }),
+    ]);
+  });
+
+  it('writes an inferred contextWindow for new custom-provider model rows', async () => {
+    await writeOpenClawJson({ models: { providers: {} } });
+
+    const { syncProviderConfigToOpenClaw } = await import('@electron/utils/openclaw-auth');
+    await syncProviderConfigToOpenClaw('custom-example', 'gpt-5.5', {
+      baseUrl: 'https://example.com/v1',
+      api: 'openai-completions',
+    });
+
+    const result = await readOpenClawJson();
+    const providers = (result.models as Record<string, unknown>).providers as Record<string, unknown>;
+    const entry = providers['custom-example'] as Record<string, unknown>;
+    const models = entry.models as Array<Record<string, unknown>>;
+
+    expect(models).toEqual([
+      expect.objectContaining({
+        id: 'gpt-5.5',
+        contextWindow: 272000,
+      }),
+    ]);
+  });
+
+  it('does not overwrite an existing contextWindow on re-sync', async () => {
+    await writeOpenClawJson({
+      models: {
+        providers: {
+          'custom-example': {
+            baseUrl: 'https://example.com/v1',
+            api: 'openai-completions',
+            models: [
+              { id: 'gpt-5.5', name: 'gpt-5.5', input: ['text'], contextWindow: 64000 },
+            ],
+          },
+        },
+      },
+    });
+
+    const { syncProviderConfigToOpenClaw } = await import('@electron/utils/openclaw-auth');
+    await syncProviderConfigToOpenClaw('custom-example', 'gpt-5.5', {
+      baseUrl: 'https://example.com/v1',
+      api: 'openai-completions',
+    });
+
+    const result = await readOpenClawJson();
+    const providers = (result.models as Record<string, unknown>).providers as Record<string, unknown>;
+    const entry = providers['custom-example'] as Record<string, unknown>;
+    const models = entry.models as Array<Record<string, unknown>>;
+
+    expect(models).toEqual([
+      expect.objectContaining({ id: 'gpt-5.5', contextWindow: 64000 }),
     ]);
   });
 
@@ -2281,5 +2336,96 @@ describe('batchSyncConfigFields', () => {
     const ssrfPolicy = (fetch.fetch as Record<string, unknown>).ssrfPolicy as Record<string, unknown>;
     expect(ssrfPolicy.allowRfc2544BenchmarkRange).toBe(false);
     expect(ssrfPolicy.allowIpv6UniqueLocalRange).toBe(false);
+  });
+
+  it('seeds compaction safeguard default when compaction is unset', async () => {
+    await writeOpenClawJson({ gateway: { auth: { mode: 'token', token: 'old' } } });
+
+    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
+    await batchSyncConfigFields('new-token');
+
+    const config = await readOpenClawJson();
+    const defaults = ((config.agents as Record<string, unknown>).defaults as Record<string, unknown>);
+    expect(defaults.compaction).toEqual({
+      mode: 'safeguard',
+      reserveTokensFloor: 50_000,
+    });
+  });
+
+  it('backfills reserveTokensFloor on safeguard compaction seeded without a floor', async () => {
+    await writeOpenClawJson({
+      gateway: { auth: { mode: 'token', token: 'old' } },
+      agents: {
+        defaults: {
+          compaction: { mode: 'safeguard' },
+        },
+      },
+    });
+
+    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
+    await batchSyncConfigFields('new-token');
+
+    const config = await readOpenClawJson();
+    const defaults = ((config.agents as Record<string, unknown>).defaults as Record<string, unknown>);
+    expect(defaults.compaction).toEqual({
+      mode: 'safeguard',
+      reserveTokensFloor: 50_000,
+    });
+  });
+
+  it('does not touch an explicit compaction config', async () => {
+    await writeOpenClawJson({
+      gateway: { auth: { mode: 'token', token: 'old' } },
+      agents: {
+        defaults: {
+          compaction: { mode: 'default', reserveTokensFloor: 30000 },
+        },
+      },
+    });
+
+    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
+    await batchSyncConfigFields('new-token');
+
+    const config = await readOpenClawJson();
+    const defaults = ((config.agents as Record<string, unknown>).defaults as Record<string, unknown>);
+    expect(defaults.compaction).toEqual({ mode: 'default', reserveTokensFloor: 30000 });
+  });
+
+  it('backfills contextWindow on custom provider model rows that lack one', async () => {
+    await writeOpenClawJson({
+      gateway: { auth: { mode: 'token', token: 'old' } },
+      models: {
+        providers: {
+          'custom-enterpri': {
+            baseUrl: 'https://example.com/v1',
+            api: 'openai-completions',
+            models: [
+              { id: 'gpt-5.5', name: 'gpt-5.5', input: ['text', 'image'] },
+              { id: 'private-x', name: 'private-x', input: ['text'], contextTokens: 32000 },
+            ],
+          },
+          moonshot: {
+            baseUrl: 'https://api.moonshot.cn/v1',
+            api: 'openai-completions',
+            models: [{ id: 'kimi-k2.6', name: 'Kimi K2.6' }],
+          },
+        },
+      },
+    });
+
+    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
+    await batchSyncConfigFields('new-token');
+
+    const config = await readOpenClawJson();
+    const providers = (config.models as Record<string, unknown>).providers as Record<string, unknown>;
+    const custom = (providers['custom-enterpri'] as Record<string, unknown>).models as Array<Record<string, unknown>>;
+    const moonshot = (providers.moonshot as Record<string, unknown>).models as Array<Record<string, unknown>>;
+
+    expect(custom[0]).toEqual(expect.objectContaining({ id: 'gpt-5.5', contextWindow: 272000 }));
+    // Rows with explicit contextTokens are user-owned — leave untouched.
+    expect(custom[1].contextWindow).toBeUndefined();
+    expect(custom[1].contextTokens).toBe(32000);
+    // Non custom-* providers own their metadata — never backfilled.
+    expect(moonshot[0].contextWindow).toBeUndefined();
   });
 });

@@ -1,8 +1,11 @@
 import { openSync, closeSync, fstatSync, readSync } from 'node:fs';
+import { access } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { CompleteHostServiceRegistry } from '../main/ipc/host-contract';
+import { stripAcpWorkingDirectoryPrefix } from '@shared/chat/session-title';
+import { isOpenClawHeartbeatPollText } from '@shared/chat/openclaw-internal';
 import type { RawMessage } from '@shared/chat/types';
-import { getOpenClawConfigDir } from '../utils/paths';
+import { resolveOpenClawStateDir } from '../utils/paths';
 import { logger } from '../utils/logger';
 import {
   removeSessionEntry,
@@ -20,6 +23,8 @@ type SessionSummary = {
   sessionKey: string;
   firstUserText: string | null;
   lastTimestamp: number | null;
+  workspacePath: string | null;
+  heartbeatOnly?: boolean;
 };
 
 type TranscriptMessage = RawMessage;
@@ -51,7 +56,8 @@ function extractMessageText(content: unknown): string {
 }
 
 function cleanSummaryUserText(text: string): string {
-  return text
+  const textAfterInitialPrefix = stripAcpWorkingDirectoryPrefix(text);
+  const cleaned = textAfterInitialPrefix
     .replace(/^Sender\s*\([^)]*\)\s*:\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
     .replace(/^Sender\s*\([^)]*\)\s*:\s*\{[\s\S]*?\}\s*/i, '')
     .replace(/^Sender\s*\([^)]*\)\s*:[^\n]*(?:\n\s*)*/i, '')
@@ -66,10 +72,14 @@ function cleanSummaryUserText(text: string): string {
     .replace(/^Conversation info\s*\([^)]*\):\s*\{[\s\S]*?\}\s*/i, '')
     .replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+[^\]]+\]\s*/i, '')
     .trim();
+  const stripCwdExposedByCleanup = !textAfterInitialPrefix.startsWith('[Working directory: ')
+    && cleaned.startsWith('[Working directory: ');
+  return (stripCwdExposedByCleanup ? stripAcpWorkingDirectoryPrefix(cleaned) : cleaned).trim();
 }
 
 function isInternalSummaryText(text: string): boolean {
   if (!text) return true;
+  if (isOpenClawHeartbeatPollText(text)) return true;
   if (/^\s*System\s*\(untrusted\)\s*:/i.test(text)) return true;
   if (
     /An async command you ran earlier has completed/i.test(text)
@@ -89,6 +99,76 @@ function isInternalSummaryText(text: string): boolean {
 function normalizeTimestamp(value: unknown): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   return value < 1e12 ? value * 1000 : value;
+}
+
+type SqliteDatabaseLike = {
+  prepare: (sql: string) => {
+    get: (...params: unknown[]) => unknown;
+  };
+};
+
+function normalizeCwdValue(value: unknown): string | null {
+  const cwd = typeof value === 'string' ? value.trim() : '';
+  return cwd || null;
+}
+
+function parseRuntimeOptionsCwd(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return normalizeCwdValue((parsed as Record<string, unknown>).cwd);
+  } catch {
+    return null;
+  }
+}
+
+function readAcpReplayCwd(db: SqliteDatabaseLike, sessionKey: string): string | null {
+  try {
+    const row = db.prepare(
+      'SELECT cwd FROM acp_replay_sessions WHERE session_key = ? ORDER BY updated_at DESC, session_id ASC LIMIT 1',
+    ).get(sessionKey) as { cwd?: unknown } | undefined;
+    return normalizeCwdValue(row?.cwd);
+  } catch {
+    return null;
+  }
+}
+
+function readAcpRuntimeMetaCwd(db: SqliteDatabaseLike, sessionKey: string): string | null {
+  try {
+    const row = db.prepare('SELECT * FROM acp_sessions WHERE session_key = ?').get(sessionKey) as {
+      runtime_options_json?: unknown;
+      cwd?: unknown;
+    } | undefined;
+    return parseRuntimeOptionsCwd(row?.runtime_options_json) ?? normalizeCwdValue(row?.cwd);
+  } catch {
+    return null;
+  }
+}
+
+async function readOpenClawAcpSessionCwds(sessionKeys: string[]): Promise<Map<string, string>> {
+  const normalizedKeys = Array.from(new Set(sessionKeys.map((sessionKey) => sessionKey.trim()).filter(Boolean)));
+  const workspaceByKey = new Map<string, string>();
+  if (normalizedKeys.length === 0) return workspaceByKey;
+
+  const databasePath = join(resolveOpenClawStateDir(), 'state', 'openclaw.sqlite');
+  try {
+    await access(databasePath);
+    const sqliteSpecifier = 'node:sqlite';
+    const { DatabaseSync } = await import(/* @vite-ignore */ sqliteSpecifier);
+    const db = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      for (const sessionKey of normalizedKeys) {
+        const cwd = readAcpReplayCwd(db, sessionKey) ?? readAcpRuntimeMetaCwd(db, sessionKey);
+        if (cwd) workspaceByKey.set(sessionKey, cwd);
+      }
+      return workspaceByKey;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return new Map();
+  }
 }
 
 function parseMessageLine(line: string): TranscriptMessage | null {
@@ -162,9 +242,14 @@ async function readAllTranscriptMessages(transcriptPath: string): Promise<Transc
   });
 }
 
-function summarizeTranscriptMessages(sessionKey: string, messages: TranscriptMessage[]): SessionSummary {
+function summarizeTranscriptMessages(
+  sessionKey: string,
+  messages: TranscriptMessage[],
+  workspacePath: string | null,
+): SessionSummary {
   let firstUserText: string | null = null;
   let lastTimestamp: number | null = null;
+  let sawHeartbeatPollText = false;
 
   for (const message of messages) {
     const normalizedTs = normalizeTimestamp(message.timestamp);
@@ -173,13 +258,24 @@ function summarizeTranscriptMessages(sessionKey: string, messages: TranscriptMes
     }
     if (firstUserText == null && message.role === 'user') {
       const text = cleanSummaryUserText(extractMessageText(message.content));
-      if (text && !isInternalSummaryText(text)) {
+      if (text && isInternalSummaryText(text)) {
+        if (isOpenClawHeartbeatPollText(text)) {
+          sawHeartbeatPollText = true;
+        }
+      } else if (text) {
         firstUserText = text;
       }
     }
   }
 
-  return { sessionKey, firstUserText, lastTimestamp };
+  const heartbeatOnly = firstUserText == null && sawHeartbeatPollText;
+  return {
+    sessionKey,
+    firstUserText,
+    lastTimestamp,
+    workspacePath,
+    ...(heartbeatOnly ? { heartbeatOnly: true } : {}),
+  };
 }
 
 function parseSessionKey(sessionKey: string): { agentId: string; suffix: string } | null {
@@ -209,7 +305,7 @@ function getLimit(payload: unknown, fallback = 200): number {
 
 async function readSessionsJson(agentId: string): Promise<Record<string, unknown>> {
   const fsP = await import('node:fs/promises');
-  const sessionsJsonPath = join(getOpenClawConfigDir(), 'agents', agentId, 'sessions', 'sessions.json');
+  const sessionsJsonPath = join(resolveOpenClawStateDir(), 'agents', agentId, 'sessions', 'sessions.json');
   const raw = await fsP.readFile(sessionsJsonPath, 'utf8');
   return JSON.parse(raw) as Record<string, unknown>;
 }
@@ -264,24 +360,24 @@ function resolveSessionTranscriptPathByKey(
   return resolvedSrcPath ?? null;
 }
 
-async function loadSessionSummary(sessionKey: string): Promise<SessionSummary> {
+async function loadSessionSummary(sessionKey: string, workspacePath: string | null): Promise<SessionSummary> {
   const parsed = parseSessionKey(sessionKey);
   if (!parsed) {
-    return { sessionKey, firstUserText: null, lastTimestamp: null };
+    return { sessionKey, firstUserText: null, lastTimestamp: null, workspacePath };
   }
 
   try {
-    const sessionsDir = join(getOpenClawConfigDir(), 'agents', parsed.agentId, 'sessions');
+    const sessionsDir = join(resolveOpenClawStateDir(), 'agents', parsed.agentId, 'sessions');
     const sessionsJson = await readSessionsJson(parsed.agentId);
     const transcriptPath = resolveSessionTranscriptPathByKey(sessionKey, sessionsDir, sessionsJson);
     if (!transcriptPath) {
-      return { sessionKey, firstUserText: null, lastTimestamp: null };
+      return { sessionKey, firstUserText: null, lastTimestamp: null, workspacePath };
     }
 
     const messages = await readAllTranscriptMessages(transcriptPath);
-    return summarizeTranscriptMessages(sessionKey, messages);
+    return summarizeTranscriptMessages(sessionKey, messages, workspacePath);
   } catch {
-    return { sessionKey, firstUserText: null, lastTimestamp: null };
+    return { sessionKey, firstUserText: null, lastTimestamp: null, workspacePath };
   }
 }
 
@@ -290,7 +386,7 @@ async function loadSessionTranscriptByKey(sessionKey: string, limit: number): Pr
   if (!parsed) return null;
 
   try {
-    const sessionsDir = join(getOpenClawConfigDir(), 'agents', parsed.agentId, 'sessions');
+    const sessionsDir = join(resolveOpenClawStateDir(), 'agents', parsed.agentId, 'sessions');
     const sessionsJson = await readSessionsJson(parsed.agentId);
     const transcriptPath = resolveSessionTranscriptPathByKey(sessionKey, sessionsDir, sessionsJson);
     if (!transcriptPath) return null;
@@ -314,7 +410,7 @@ async function deleteSession(sessionKey: string): Promise<{ success: boolean; er
     return { success: false, error: `Invalid agentId: ${agentId}` };
   }
 
-  const sessionsDir = join(getOpenClawConfigDir(), 'agents', agentId, 'sessions');
+  const sessionsDir = join(resolveOpenClawStateDir(), 'agents', agentId, 'sessions');
   const sessionsJsonPath = join(sessionsDir, 'sessions.json');
   logger.info(`[session:delete] key=${sessionKey} agentId=${agentId}`);
   logger.info(`[session:delete] sessionsJson=${sessionsJsonPath}`);
@@ -382,7 +478,7 @@ async function renameSession(sessionKey: string, label: string): Promise<{ succe
     return { success: false, error: `Invalid agentId in sessionKey: ${agentId}` };
   }
 
-  const sessionsJsonPath = join(getOpenClawConfigDir(), 'agents', agentId, 'sessions', 'sessions.json');
+  const sessionsJsonPath = join(resolveOpenClawStateDir(), 'agents', agentId, 'sessions', 'sessions.json');
   const fsP = await import('node:fs/promises');
   const raw = await fsP.readFile(sessionsJsonPath, 'utf8');
   const json = JSON.parse(raw) as Record<string, unknown>;
@@ -429,9 +525,12 @@ export function createSessionsApi(): CompleteHostServiceRegistry['sessions'] {
         ? body.sessionKeys.filter((value): value is string => typeof value === 'string' && value.startsWith('agent:'))
         : [];
       if (sessionKeys.length === 0) return { success: true, summaries: [] };
+      const workspaceByKey = await readOpenClawAcpSessionCwds(sessionKeys);
       return {
         success: true,
-        summaries: await Promise.all(sessionKeys.map((sessionKey) => loadSessionSummary(sessionKey))),
+        summaries: await Promise.all(sessionKeys.map((sessionKey) => (
+          loadSessionSummary(sessionKey, workspaceByKey.get(sessionKey.trim()) ?? null)
+        ))),
       };
     },
     history: async (payload) => {
@@ -454,7 +553,7 @@ export function createSessionsApi(): CompleteHostServiceRegistry['sessions'] {
       }
 
       try {
-        const transcriptPath = join(getOpenClawConfigDir(), 'agents', agentId, 'sessions', `${sessionId}.jsonl`);
+        const transcriptPath = join(resolveOpenClawStateDir(), 'agents', agentId, 'sessions', `${sessionId}.jsonl`);
         return { success: true, messages: readRecentTranscriptMessages(transcriptPath, limit) };
       } catch (error) {
         if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {

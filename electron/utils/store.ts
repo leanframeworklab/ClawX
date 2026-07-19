@@ -19,6 +19,7 @@ import {
   isTelemetryEnabledByRuntime,
   isUpdateChecksEnabledByRuntime,
 } from './runtime-flags';
+import { DEFAULT_WORKSPACE_CWD } from '@shared/workspace';
 
 // Lazy-load electron-store (ESM module)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -74,6 +75,9 @@ export interface AppSettings {
   // UI State
   sidebarCollapsed: boolean;
   devModeUnlocked: boolean;
+  chatWorkspacePath: string;
+  recentWorkspacePaths: string[];
+  workspaceLabels: Record<string, string>;
 
   // Presets
   selectedBundles: string[];
@@ -135,6 +139,9 @@ function createDefaultSettings(): AppSettings {
     // UI State
     sidebarCollapsed: false,
     devModeUnlocked: false,
+    chatWorkspacePath: DEFAULT_WORKSPACE_CWD,
+    recentWorkspacePaths: [DEFAULT_WORKSPACE_CWD],
+    workspaceLabels: {},
 
     // Presets
     selectedBundles: ['productivity', 'developer'],

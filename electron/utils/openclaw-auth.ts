@@ -32,13 +32,14 @@ import {
 } from './provider-keys';
 import { normalizePiAiModelCost, type PiAiModelCostRates } from '../shared/pi-ai-model-cost';
 import { withConfigLock } from './config-mutex';
+import { ensureMemorySearchDisabledDefault, hasUserMemorySearchConfig } from './openclaw-memory-search';
 import { PORTS } from './config';
 import { getSetting } from './store';
 import {
   assertValidApiProtocol,
   normalizeOpenClawApiProtocol,
 } from '../shared/providers/types';
-import { inferCustomModelInputModalities } from '../shared/providers/model-capabilities';
+import { inferCustomModelContextWindow, inferCustomModelInputModalities } from '../shared/providers/model-capabilities';
 import {
   CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
   CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
@@ -525,6 +526,8 @@ async function discoverAgentIds(): Promise<string[]> {
 const OPENCLAW_CONFIG_PATH = join(homedir(), '.openclaw', 'openclaw.json');
 const FEISHU_PLUGIN_ID_CANDIDATES = ['openclaw-lark', 'feishu-openclaw-plugin'] as const;
 const VALID_COMPACTION_MODES = new Set(['default', 'safeguard']);
+/** Matches OpenClaw's 200k+ context-window recommendation (see computeContextAwareReserveTokensFloor). */
+const DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR = 50_000;
 const BUILTIN_CHANNEL_IDS = new Set([
   'discord',
   'telegram',
@@ -848,6 +851,86 @@ function normalizeAgentsDefaultsCompactionMode(config: Record<string, unknown>):
   if (typeof mode === 'string' && mode.length > 0 && !VALID_COMPACTION_MODES.has(mode)) {
     compaction.mode = 'default';
   }
+}
+
+/**
+ * Seed `agents.defaults.compaction.mode = "safeguard"` when the user has no
+ * compaction config at all, so long sessions are compacted before they hit the
+ * provider's context limit. Never touches an existing compaction object.
+ */
+function ensureCompactionSafeguardDefault(config: Record<string, unknown>): boolean {
+  const agents = (config.agents && typeof config.agents === 'object'
+    ? config.agents as Record<string, unknown>
+    : {});
+  const defaults = (agents.defaults && typeof agents.defaults === 'object'
+    ? agents.defaults as Record<string, unknown>
+    : {});
+  if (defaults.compaction !== undefined) return false;
+
+  defaults.compaction = {
+    mode: 'safeguard',
+    reserveTokensFloor: DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR,
+  };
+  agents.defaults = defaults;
+  config.agents = agents;
+  return true;
+}
+
+/**
+ * Backfill `reserveTokensFloor` on compaction configs that ClawX or OpenClaw
+ * seeded without one. OpenClaw's built-in default (20k) is too low once
+ * contextWindow backfill activates safeguard compaction on 200k+ models.
+ */
+function backfillCompactionReserveTokensFloor(config: Record<string, unknown>): boolean {
+  const agents = (config.agents && typeof config.agents === 'object'
+    ? config.agents as Record<string, unknown>
+    : null);
+  if (!agents) return false;
+
+  const defaults = (agents.defaults && typeof agents.defaults === 'object'
+    ? agents.defaults as Record<string, unknown>
+    : null);
+  if (!defaults) return false;
+
+  const compaction = (defaults.compaction && typeof defaults.compaction === 'object'
+    ? defaults.compaction as Record<string, unknown>
+    : null);
+  if (!compaction || compaction.reserveTokensFloor !== undefined) return false;
+
+  compaction.reserveTokensFloor = DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR;
+  defaults.compaction = compaction;
+  agents.defaults = defaults;
+  config.agents = agents;
+  return true;
+}
+
+/**
+ * Self-heal helper: walk `models.providers.custom-*` entries and fill in an
+ * inferred `contextWindow` on model rows that have neither `contextWindow`
+ * nor `contextTokens`. Rows written by older ClawX versions only carried
+ * `{ id, name, input }`, which disables OpenClaw's preemptive compaction and
+ * context-window guard for custom providers.
+ *
+ * Deliberately scoped to `custom-` keys: registry providers own their
+ * metadata, and small local models (ollama) must not inherit a large window.
+ */
+function backfillCustomProviderModelContextWindows(config: Record<string, unknown>): string[] {
+  const models = (config.models || {}) as Record<string, unknown>;
+  const providers = (models.providers || {}) as Record<string, unknown>;
+  const backfilled: string[] = [];
+
+  for (const [providerKey, entry] of Object.entries(providers)) {
+    if (!providerKey.startsWith('custom-') || !isPlainRecord(entry)) continue;
+    const rows = Array.isArray(entry.models) ? entry.models : [];
+    for (const row of rows) {
+      if (!isPlainRecord(row) || typeof row.id !== 'string' || !row.id) continue;
+      if (typeof row.contextWindow === 'number' || typeof row.contextTokens === 'number') continue;
+      row.contextWindow = inferCustomModelContextWindow(row.id);
+      backfilled.push(`${providerKey}/${row.id}`);
+    }
+  }
+
+  return backfilled;
 }
 
 async function writeOpenClawJson(config: Record<string, unknown>): Promise<void> {
@@ -1851,7 +1934,12 @@ function upsertOpenClawProviderEntry(
     id,
     name: id,
     ...(options.inferRuntimeModelInputs
-      ? { input: inferCustomModelInputModalities(id) }
+      ? {
+        input: inferCustomModelInputModalities(id),
+        // Without an explicit contextWindow OpenClaw cannot budget compaction
+        // for custom providers and long sessions die with context overflow.
+        contextWindow: inferCustomModelContextWindow(id),
+      }
       : {}),
   }));
   let mergedModels = mergeProviderModels(registryModels, existingModels, runtimeModels);
@@ -2642,6 +2730,35 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
       modified = true;
     }
 
+    // ── Compaction safeguard default ──
+    if (ensureCompactionSafeguardDefault(config)) {
+      modified = true;
+      console.log(`[batch-sync] Seeded agents.defaults.compaction.mode=safeguard reserveTokensFloor=${DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR}`);
+    } else if (backfillCompactionReserveTokensFloor(config)) {
+      modified = true;
+      console.log(`[batch-sync] Backfilled agents.defaults.compaction.reserveTokensFloor=${DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR}`);
+    }
+
+    // ── Memory search default ──
+    // OpenClaw defaults to the openai embedding provider; without a key that
+    // yields doctor errors and a broken memory_search tool. Seed enabled=false
+    // only when the user has no memorySearch config anywhere AND no OpenAI key
+    // (i.e. the default embedding model is unusable). Existing user config is
+    // never modified.
+    if (!hasUserMemorySearchConfig(config)
+      && !(await getProviderApiKeyFromOpenClaw('openai'))
+      && ensureMemorySearchDisabledDefault(config)) {
+      modified = true;
+      console.log('[batch-sync] Seeded agents.defaults.memorySearch.enabled=false (no embedding provider configured)');
+    }
+
+    // ── Custom provider contextWindow backfill ──
+    const backfilledContextWindows = backfillCustomProviderModelContextWindows(config);
+    if (backfilledContextWindows.length > 0) {
+      modified = true;
+      console.log(`[batch-sync] Backfilled contextWindow for custom provider models: ${backfilledContextWindows.join(', ')}`);
+    }
+
     if (modified) {
       await writeOpenClawJson(config);
       console.log('Synced gateway token, browser config, web_fetch SSRF policy, and session idle to openclaw.json');
@@ -2697,6 +2814,15 @@ async function updateModelsJsonProviderEntriesForAgents(
     const mergedModels = (entry.models ?? []).map((m) => {
       const prev = existingModels.find((e) => e.id === m.id);
       const base = prev ? { ...prev, id: m.id, name: m.name } : { ...m };
+      // Custom-provider rows need an explicit contextWindow so the embedded
+      // runner can budget compaction (see backfillCustomProviderModelContextWindows).
+      if (
+        providerType.startsWith('custom-')
+        && typeof base.contextWindow !== 'number'
+        && typeof base.contextTokens !== 'number'
+      ) {
+        base.contextWindow = inferCustomModelContextWindow(m.id);
+      }
       return {
         ...base,
         cost: normalizePiAiModelCost((base as { cost?: unknown }).cost),

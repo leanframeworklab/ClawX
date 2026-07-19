@@ -14,6 +14,10 @@ test.describe('ClawX chat model picker', () => {
         let currentModelRef = refs.alphaModelRef;
         const hostRequests: Array<{ path: string; method: string; body: unknown }> = [];
         const now = new Date().toISOString();
+        let releaseProviderAccounts: (() => void) | undefined;
+        const providerAccountsReady = new Promise<void>((resolve) => {
+          releaseProviderAccounts = resolve;
+        });
         const originalHostInvoke = (ipcMain as unknown as {
           _invokeHandlers?: Map<string, (event: unknown, request: unknown) => Promise<unknown>>;
         })._invokeHandlers?.get('host:invoke');
@@ -77,6 +81,9 @@ test.describe('ClawX chat model picker', () => {
           if (request?.module === 'gateway' && request.action === 'status') {
             return makeResponse(request.id, { state: 'running', port: 18789, pid: 12345, gatewayReady: true });
           }
+          if (request?.module === 'chat' && request.action === 'loadAcpSession') {
+            return makeResponse(request.id, { success: true, generation: 1 });
+          }
           if (request?.module === 'gateway' && request.action === 'rpc') {
             const method = typeof body?.method === 'string' ? body.method : '';
             const params = body?.params ?? null;
@@ -102,6 +109,7 @@ test.describe('ClawX chat model picker', () => {
             return makeResponse(request.id, agentsSnapshot());
           }
           if (request?.module === 'providers' && request.action === 'accounts') {
+            await providerAccountsReady;
             return makeResponse(request.id, [
               {
                 id: 'alpha1234',
@@ -127,6 +135,18 @@ test.describe('ClawX chat model picker', () => {
                 createdAt: now,
                 updatedAt: now,
               },
+              {
+                id: 'openai-oauth',
+                vendorId: 'openai',
+                label: 'OpenAI',
+                authMode: 'oauth_browser',
+                model: 'openai/gpt-5.6',
+                metadata: { customModels: ['gpt-5.5', 'openai/gpt-5.6'] },
+                enabled: true,
+                isDefault: false,
+                createdAt: now,
+                updatedAt: now,
+              },
             ]);
           }
           if (request?.module === 'providers' && request.action === 'list') {
@@ -142,7 +162,9 @@ test.describe('ClawX chat model picker', () => {
             ]);
           }
           if (request?.module === 'providers' && request.action === 'vendors') {
-            return makeResponse(request.id, []);
+            return makeResponse(request.id, [
+              { id: 'openai', name: 'OpenAI', supportedAuthModes: ['api_key', 'oauth_browser'] },
+            ]);
           }
           if (request?.module === 'providers' && request.action === 'getDefaultAccount') {
             return makeResponse(request.id, { accountId: 'alpha1234' });
@@ -152,11 +174,29 @@ test.describe('ClawX chat model picker', () => {
         });
 
         (globalThis as typeof globalThis & { __chatModelPickerRequests?: typeof hostRequests }).__chatModelPickerRequests = hostRequests;
+        (globalThis as typeof globalThis & {
+          __releaseChatModelProviders?: () => void;
+        }).__releaseChatModelProviders = releaseProviderAccounts;
       }, { alphaModelRef, betaModelRef });
 
       const page = await getStableWindow(app);
       await page.reload();
       await expect(page.getByTestId('main-layout')).toBeVisible();
+      await expect.poll(async () => app.evaluate(() => (
+        (globalThis as typeof globalThis & {
+          __chatModelPickerRequests?: Array<{ path: string }>;
+        }).__chatModelPickerRequests?.some((request) => request.path === 'providers:accounts') ?? false
+      ))).toBe(true);
+      expect(await app.evaluate(() => (
+        (globalThis as typeof globalThis & {
+          __chatModelPickerRequests?: Array<{ path: string }>;
+        }).__chatModelPickerRequests?.some((request) => request.path === 'agents:updateModel') ?? false
+      ))).toBe(false);
+      await app.evaluate(() => {
+        (globalThis as typeof globalThis & {
+          __releaseChatModelProviders?: () => void;
+        }).__releaseChatModelProviders?.();
+      });
       await app.evaluate(({ BrowserWindow }) => {
         const win = BrowserWindow.getAllWindows()[0];
         win?.webContents.send('gateway:status-changed', { state: 'running', port: 18789, pid: 12345, gatewayReady: true });
@@ -166,6 +206,9 @@ test.describe('ClawX chat model picker', () => {
       await page.getByTestId('chat-model-picker-button').click();
       await expect(page.getByTestId('chat-model-picker-menu')).toBeVisible();
       await expect(page.getByTestId('chat-model-picker-menu')).toContainText('provider/model-beta (Beta)');
+      await expect(page.getByTestId('chat-model-picker-menu')).toContainText('gpt-5.6 (OpenAI)');
+      await expect(page.getByTestId('chat-model-picker-menu')).not.toContainText('gpt-5.5 (OpenAI)');
+      await expect(page.getByTestId('chat-model-picker-menu')).not.toContainText('openai/gpt-5.6 (OpenAI)');
       await page.getByTestId('chat-model-picker-menu').getByRole('button', { name: 'provider/model-beta (Beta)' }).click();
       await expect(page.getByTestId('chat-model-picker-button')).toContainText('provider/model-beta (Beta)');
 

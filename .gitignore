@@ -87,3 +87,5 @@ resources/openclaw-plugins/skillshub/
 
 # Auto-generated tooling cache
 .codegraph/
+.opencode
+.superpowers

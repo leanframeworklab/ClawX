@@ -20,6 +20,10 @@ import {
   type DeviceIdentity,
 } from '../utils/device-identity';
 import {
+  cancelLocalDeviceAutoApproval,
+  scheduleLocalDeviceAutoApproval,
+} from '../utils/control-ui-device-pairing';
+import {
   DEFAULT_RECONNECT_CONFIG,
   type ReconnectConfig,
   type GatewayLifecycleState,
@@ -496,6 +500,7 @@ export class GatewayManager extends EventEmitter {
    */
   async stop(): Promise<void> {
     logger.info('Gateway stop requested');
+    cancelLocalDeviceAutoApproval();
     this.lifecycleController.bump('stop');
     // Disable auto-reconnect
     this.shouldReconnect = false;
@@ -1183,11 +1188,13 @@ export class GatewayManager extends EventEmitter {
         });
         this.startPing();
         this.scheduleGatewayReadyFallback();
+        scheduleLocalDeviceAutoApproval(this);
       },
       onMessage: (message) => {
         this.handleMessage(message);
       },
       onCloseAfterHandshake: (closeCode) => {
+        cancelLocalDeviceAutoApproval();
         this.connectionMonitor.clear();
         this.recordSocketClose(closeCode);
         this.diagnostics.consecutiveHeartbeatMisses = 0;
